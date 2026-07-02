@@ -128,6 +128,7 @@ CREATE TABLE IF NOT EXISTS silver_reconciliation_standard (
     invoice_number_normalized STRING,        -- revision suffixes stripped -- see src/normalization.py
     invoice_date              DATE,
     ro_number                 STRING,
+    work_order_number         STRING,        -- statement-side concept, nullable -- captured in Bronze but previously dropped before Silver; the Mock ERP Generator's vendor_reference_issue scenario needs the real value
     po_number                 STRING,
     amount                    DECIMAL(12,2),
     credit                    DECIMAL(12,2),

@@ -20,6 +20,22 @@
 #     "statement date" distinct from individual invoice dates.
 #   - posting_date and status stay NULL here -- they're ERP-side concepts,
 #     populated only when the ERP side is normalized (Phase 4+).
+#
+# Phase B follow-up: Cell 7's validation no longer assumes every statement
+# invoice always reaches Bronze. Under the AI extraction path, a record can
+# legitimately be routed to validation_document_review_queue instead (low
+# confidence, missing fields, duplicates) -- that is by design, not a
+# defect, so a hard "must equal the full-statement total" assert is no
+# longer correct. Validation now compares Silver against whatever Bronze
+# actually contains, which still deterministically catches a real
+# normalization bug (a row or amount silently dropped/changed going
+# Bronze -> Silver) without assuming perfect upstream extraction.
+#
+# Mock ERP Generator follow-up: work_order_number is now carried through to
+# Silver (it was captured in Bronze all along but dropped here). The
+# generator's vendor_reference_issue scenario needs the REAL work order
+# number -- asTech's actual SIN12307276 / 24419074 data-quality case -- not
+# a synthesized stand-in, to mean anything.
 # ==========================================================================
 
 # ---- CELL 1: Environment setup (Fabric-safe) ----------------------------
@@ -82,6 +98,7 @@ silver_new = (
     .withColumn("invoice_number_normalized", normalize_udf(F.col("raw_invoice_number"), suffix_array))
     .withColumn("invoice_date", F.to_date(F.col("raw_invoice_date"), date_fmt))
     .withColumn("ro_number", F.col("raw_ro_number"))
+    .withColumn("work_order_number", F.col("raw_work_order_number"))
     .withColumn("po_number", F.lit(None).cast("string"))   # asTech's statement has no PO column
     .withColumn("outstanding_amount",
         F.regexp_replace(F.col("raw_outstanding_amount"), r"[^\d\.\-]", "").cast(DecimalType(12, 2)))
@@ -94,9 +111,9 @@ silver_new = (
     .select(
         "record_id", "record_source", "document_type", "statement_id", "statement_date",
         "vendor_id", "vendor_name", "shop", "invoice_number", "invoice_number_normalized",
-        "invoice_date", "ro_number", "po_number", "amount", "credit", "outstanding_amount",
-        "due_date", "posting_date", "status", "description", "statement_period",
-        "source_file", "ingestion_timestamp",
+        "invoice_date", "ro_number", "work_order_number", "po_number", "amount", "credit",
+        "outstanding_amount", "due_date", "posting_date", "status", "description",
+        "statement_period", "source_file", "ingestion_timestamp",
     )
 )
 
@@ -117,6 +134,15 @@ silver_new.write.mode("append").saveAsTable("silver_reconciliation_standard")
 print("Silver normalization (VENDOR_STATEMENT side) written.")
 
 # ---- CELL 7: Validate -----------------------------------------------------
+# bronze_total is computed the same way 01_bronze_ingestion.py's own Bronze
+# validation computes it (strip $/,/spaces, cast to double) -- Silver's
+# total must match BRONZE'S total, not a hardcoded full-statement figure,
+# since Bronze itself may legitimately hold fewer than the full statement's
+# rows when the AI path has routed some to validation_document_review_queue.
+bronze_total = bronze.withColumn(
+    "amt", F.regexp_replace(F.col("raw_outstanding_amount"), "[$, ]", "").cast("double")
+).agg(F.sum("amt")).collect()[0][0]
+
 silver_check = spark.table("silver_reconciliation_standard").filter(
     (F.col("record_source") == "VENDOR_STATEMENT") &
     (F.col("statement_period") == vendor_config["period"]["end_date"][:7])
@@ -126,18 +152,42 @@ silver_total = silver_check.agg(F.sum("outstanding_amount")).collect()[0][0]
 null_dates = silver_check.filter(F.col("invoice_date").isNull()).count()
 null_amounts = silver_check.filter(F.col("outstanding_amount").isNull()).count()
 
+review_queue_count = 0
+if target_statement_ids:  # computed once already, in Cell 6
+    review_queue_count = spark.table("validation_document_review_queue").filter(
+        F.col("statement_id").isin(target_statement_ids)
+    ).count()
+
+print(f"Bronze row count (this run's extraction): {bronze_count}  |  Bronze total: {bronze_total}")
 print(f"Silver row count: {silver_count}")
 print(f"Silver total outstanding_amount: {silver_total}")
 print(f"Rows with unparsed invoice_date: {null_dates}")
 print(f"Rows with unparsed outstanding_amount: {null_amounts}")
+print(f"Rows flagged in validation_document_review_queue for {target_statement_ids} "
+      f"(informational only -- these were intentionally excluded from Bronze, not a normalization failure): {review_queue_count}")
 
 sample_normalized = silver_check.select("invoice_number", "invoice_number_normalized").limit(3).collect()
 print("\nSample invoice_number -> invoice_number_normalized (unchanged for asTech, no revisions in this statement):")
 for r in sample_normalized:
     print(f"  {r['invoice_number']} -> {r['invoice_number_normalized']}")
 
+# Genuine data-integrity checks -- these must ALWAYS hold, regardless of
+# which extraction path populated Bronze or how many rows (if any) the AI
+# path routed to the review queue instead of Bronze:
+assert bronze_count > 0, "Bronze has zero rows for this vendor/period -- extraction produced nothing to normalize."
 assert silver_count == bronze_count, f"Row count changed during normalization: {bronze_count} -> {silver_count}"
-assert round(float(silver_total), 2) == 13860.79, f"Total mismatch after normalization: {silver_total}"
+assert bronze_total is not None and round(float(silver_total), 2) == round(float(bronze_total), 2), \
+    f"Total drifted during normalization: bronze={bronze_total}, silver={silver_total}"
 assert null_dates == 0, f"{null_dates} rows failed date parsing"
 assert null_amounts == 0, f"{null_amounts} rows failed amount parsing"
-print("\nAll Phase 3 validation checks passed.")
+
+FULL_STATEMENT_ROW_COUNT, FULL_STATEMENT_TOTAL = 202, 13860.79
+if bronze_count == FULL_STATEMENT_ROW_COUNT and round(bronze_total, 2) == FULL_STATEMENT_TOTAL:
+    print(f"\nBronze matches the full-statement baseline ({FULL_STATEMENT_ROW_COUNT} rows, "
+          f"${FULL_STATEMENT_TOTAL}) -- extraction recovered every invoice this run.")
+else:
+    print(f"\nBronze holds {bronze_count} rows (vs. the {FULL_STATEMENT_ROW_COUNT}-row full-statement "
+          f"baseline) -- expected whenever the AI path routes records to validation_document_review_queue; "
+          f"see that table for {target_statement_ids} before treating this as a regression.")
+
+print("\nAll Phase 3 (vendor statement side) validation checks passed.")

@@ -6,16 +6,21 @@ Solution Architecture Brief. Built on Microsoft Fabric: Lakehouse, Delta
 Tables, PySpark, Power BI, with Gemini as an isolated AI service for
 document understanding and exception explanation.
 
-**Status:** Phase A complete (AI Service Layer, Validation Layer,
-Review Queue, Audit Logging) plus Silver normalization for the vendor
-statement side. Phase B complete: `ExtractionService` now drives Gemini as
+**Status:** Phase A and Phase B complete. Phase A: AI Service Layer,
+Validation Layer, Review Queue, Audit Logging, Silver normalization for
+the vendor statement side. Phase B: `ExtractionService` drives Gemini as
 the primary extraction path for `01_bronze_ingestion.py`, with every
 AI-extracted record routed through the Validation Layer into either Bronze
 or `validation_document_review_queue`, and every AI call logged to
-`ai_audit_log`. The original pdfplumber table extraction is retained,
+`ai_audit_log`; the original pdfplumber table extraction is retained,
 unchanged, as a configurable fallback -- see "AI Service Layer" below.
-Next: the Mock ERP Generator, Silver normalization for the ERP side, and
-the deterministic Matching Engine.
+Both sides of the reconciliation now exist in Silver: the Mock ERP
+Generator (`03_mock_erp_generator.py`, no AI involved) simulates a
+NetSuite export by mutating Silver's `VENDOR_STATEMENT` rows per
+`config/mock_erp/astech_scenarios.json`, and `04_silver_normalization_erp.py`
+normalizes that into `silver_reconciliation_standard` tagged
+`record_source = 'INTERNAL_ERP'` -- see "Mock ERP Generator" below. Next:
+the deterministic Matching Engine and Gold population.
 
 This is a PoC, not a production system, but every design decision is
 made as if it will run in one. Code is written to be pasted directly
@@ -60,7 +65,9 @@ vive_reconciliation_poc/
 ├── notebooks/
 │   ├── 00_setup_lakehouse_schema.py         # creates every Bronze/Silver/Gold/validation/audit Delta table
 │   ├── 01_bronze_ingestion.py               # vendor statement PDF -> bronze_vendor_statement_raw
-│   └── 02_silver_normalization_statement.py # Bronze -> silver_reconciliation_standard (VENDOR_STATEMENT side)
+│   ├── 02_silver_normalization_statement.py # Bronze -> silver_reconciliation_standard (VENDOR_STATEMENT side)
+│   ├── 03_mock_erp_generator.py             # Silver VENDOR_STATEMENT -> bronze_internal_erp_raw + validation_mutation_manifest -- no AI, fully deterministic
+│   └── 04_silver_normalization_erp.py       # bronze_internal_erp_raw -> silver_reconciliation_standard (INTERNAL_ERP side)
 ├── src/
 │   ├── normalization.py             # invoice-number revision-suffix normalization, config-driven, unit-tested
 │   ├── ai/
@@ -71,9 +78,13 @@ vive_reconciliation_poc/
 │   │   ├── extraction_pipeline.py   # Phase B: Spark-free glue -- standardizes raw records, runs them through the Validation Layer, splits Bronze-bound vs. review-queue-bound, dedupes across pages
 │   │   ├── explanation_service.py   # interface defined -- implementation lands in the AI Exception Analysis phase
 │   │   └── summary_service.py       # interface defined -- implementation lands in the AI Executive Summary phase
-│   └── validation/
-│       ├── extraction_validator.py  # deterministic gate: structural checks + confidence evaluation + duplicate detection
-│       └── review_queue.py          # Phase B: turns a rejected record into one validation_document_review_queue row
+│   ├── validation/
+│   │   ├── extraction_validator.py  # deterministic gate: structural checks + confidence evaluation + duplicate detection
+│   │   └── review_queue.py          # Phase B: turns a rejected record into one validation_document_review_queue row
+│   └── mock_erp/                    # no AI, no Spark -- pure Python, fully unit-tested
+│       ├── scenario_assignment.py   # proportionally + reproducibly assigns each statement invoice a scenario, seeded
+│       ├── mutations.py             # one function per scenario -- the ERP-side fields that vary by scenario
+│       └── generator.py             # orchestrates assignment + mutation + manifest construction; the only entry point notebooks call
 ├── tests/
 │   ├── test_normalization.py
 │   ├── test_gemini_client.py        # exercised via injected fake transport -- no network access needed
@@ -81,7 +92,10 @@ vive_reconciliation_poc/
 │   ├── test_audit_logger.py
 │   ├── test_extraction_service.py   # Phase B: exercised via a fake AIClient -- no network access needed
 │   ├── test_extraction_pipeline.py  # Phase B: no Spark, no PDF -- canned ExtractionOutcome inputs
-│   └── test_review_queue.py         # Phase B
+│   ├── test_review_queue.py         # Phase B
+│   ├── test_scenario_assignment.py  # proportions, reproducibility, no Spark
+│   ├── test_mutations.py            # one test group per scenario, no Spark
+│   └── test_generator.py            # full runs against the REAL astech_scenarios.json, no Spark
 ├── sample_data/
 │   ├── astech_vendor_statement_may2026.pdf
 │   └── astech_payment_voucher_may2026.pdf   # retained for the dormant payment_voucher adapter
@@ -101,7 +115,7 @@ vive_reconciliation_poc/
 |---|---|---|
 | Workspace | `VIVE-Reconciliation-PoC` | Isolates the PoC from the production VIVE Collision reporting workspace |
 | Lakehouse | `VIVE_Reconciliation_LH` | Holds all Bronze/Silver/Gold/validation/audit tables |
-| Notebooks | `00_setup_lakehouse_schema`, `01_bronze_ingestion`, `02_silver_normalization_statement`, plus Phase B+ notebooks as they land | One notebook per pipeline stage |
+| Notebooks | `00_setup_lakehouse_schema`, `01_bronze_ingestion`, `02_silver_normalization_statement`, `03_mock_erp_generator`, `04_silver_normalization_erp`, plus the Matching Engine notebook(s) to come | One notebook per pipeline stage |
 | AI service | Gemini (via `src/ai/`) | Document understanding (extraction) and, in later phases, exception explanation + executive summaries |
 | Secrets | Fabric-managed secret / environment variable | `GEMINI_API_KEY` — never stored in code or config |
 | Power BI report | `VIVE Reconciliation PoC Dashboard` | Reads only Gold tables (+ AI executive summary, once that phase lands) |
@@ -131,8 +145,10 @@ lands with the Matching Engine phase.
 
 **Cross-cutting, non-business tables:**
 - `validation_mutation_manifest` — ground truth written by the Mock ERP
-  Generator, letting the matching engine be verified automatically
-  against known-planted scenarios.
+  Generator (one row per statement invoice, `expected_match_status` /
+  `expected_match_level` / `expected_exception_reason` copied verbatim
+  from `config/mock_erp/astech_scenarios.json`), letting the matching
+  engine be verified automatically against known-planted scenarios.
 - `validation_document_review_queue` — anything that fails structural
   validation, is missing mandatory fields, or falls below the
   confidence threshold. Named for its broader scope (not just AI
@@ -199,6 +215,50 @@ reverts the whole document to the exact Phase A behavior (no validation
 gate, no review queue, no audit log — that path was never designed to
 need one).
 
+## Mock ERP Generator
+
+A real NetSuite export isn't available for this PoC, so
+`03_mock_erp_generator.py` simulates one deterministically -- no AI, no
+network, seeded and reproducible. All real logic lives in `src/mock_erp/`
+(Spark-free, fully unit-tested); the notebook is a thin orchestrator, same
+split as `src/ai/`.
+
+```
+Silver VENDOR_STATEMENT rows (ordered + collected deterministically)
+        │
+        ▼
+scenario_assignment.assign_scenarios -- proportional, seeded (random_seed
+in config/mock_erp/astech_scenarios.json)
+        │
+        ▼
+mutations.MUTATORS[scenario_type] -- one function per scenario, the
+ERP-side fields that actually vary
+        │
+        ▼
+generator.generate_mock_erp -- applies common fields (status, posting_date,
+po_number, row_number) centrally, builds one manifest row per invoice
+        │
+   ┌────┴────┐
+   ▼         ▼
+bronze_internal_erp_raw   validation_mutation_manifest
+```
+
+Two determinism details worth knowing if this is ever re-run and expected
+to reproduce exactly: `random.Random(seed)` only reproduces the *shuffle*
+correctly if the input row order is itself stable, so the notebook
+`.orderBy("invoice_number", "ro_number", "record_id")`s Silver before
+`.collect()` — Spark's own row order across runs is not guaranteed
+otherwise. And `04_silver_normalization_erp.py`'s `record_id` hash
+includes `row_number` (Bronze's "generation sequence" column), unlike the
+statement side's hash — without it, the `duplicate_invoice` scenario's two
+intentionally-identical ERP rows would collide on the same surrogate key.
+
+`vendor_reference_issue` substitutes the real `work_order_number` (carried
+through to Silver as part of this phase — it was captured in Bronze all
+along but previously dropped before reaching Silver) for the invoice
+number, mirroring an actual asTech data-quality case, and clears
+`ro_number` so Level 3 matching can't rescue it either.
+
 ## Adding a new vendor later (KSI, Fred Beans, VINART, Quirk)
 
 1. Drop a new config file in `config/vendors/<vendor>.json`.
@@ -215,8 +275,11 @@ python3 tests/test_audit_logger.py
 python3 tests/test_extraction_service.py
 python3 tests/test_extraction_pipeline.py
 python3 tests/test_review_queue.py
+python3 tests/test_scenario_assignment.py
+python3 tests/test_mutations.py
+python3 tests/test_generator.py
 ```
-All seven are self-contained (no pytest dependency, no network access,
+All ten are self-contained (no pytest dependency, no network access,
 no Spark session required) and exit non-zero on any failure.
 
 ## Running the pipeline locally (for development/testing only)
