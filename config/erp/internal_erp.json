@@ -1,0 +1,43 @@
+{
+  "_comment": "This file defines which system currently plays the role of 'Internal ERP Dataset'. The matching engine reads only silver_reconciliation_standard where record_source = 'INTERNAL_ERP' -- it never reads this file and never knows which adapter produced that data. Swapping active_adapter to 'netsuite' in production requires zero changes to Silver normalization contracts or the matching engine, only a new adapter that outputs the same standard schema.",
+
+  "active_adapter": "mock_erp_generator",
+
+  "adapters": {
+    "mock_erp_generator": {
+      "document_type": "MOCK_ERP_EXTRACT",
+      "format": "generated",
+      "status": "active",
+      "_comment": "Generates a synthetic-but-realistic ERP extract seeded from Silver VENDOR_STATEMENT rows, with controlled mutations. See config/mock_erp/astech_scenarios.json for the scenario mix, seed, and per-mutation parameters -- nothing here or in the generator notebook hardcodes those values.",
+      "seed_source": "silver_reconciliation_standard WHERE record_source = 'VENDOR_STATEMENT'",
+      "scenario_config_path": "config/mock_erp/astech_scenarios.json",
+      "output_target": "bronze_internal_erp_raw"
+    },
+    "payment_voucher": {
+      "document_type": "PAYMENT_VOUCHER",
+      "format": "tabular_pdf",
+      "status": "dormant",
+      "_comment": "Retained, not deleted. A Payment Voucher is generated AFTER reconciliation happens (per the architecture brief's own business flow), so using it as the reconciliation's reference input was circular -- it only ever reflects discrepancies someone already resolved. Kept here as a working, tested adapter for a possible future 'voucher vs. statement' check, which is a legitimately different question from 'ERP vs. statement'.",
+      "source_column_mapping": {
+        "Date": "transaction_date",
+        "Description": "description",
+        "Amount Due": "amount_due",
+        "Applied Amount": "applied_amount"
+      },
+      "invoice_extraction": {
+        "method": "regex_from_description",
+        "invoice_pattern": "Bill #(\\S+)",
+        "credit_pattern": "Bill Credit #(\\S+)"
+      },
+      "vendor_header_field": "Paid To"
+    },
+    "netsuite": {
+      "document_type": "NETSUITE_INVOICE",
+      "format": "api",
+      "status": "future",
+      "_comment": "Placeholder for production. Same standard schema output required: vendor_id, invoice_number, ro_number, po_number, amount, outstanding_amount, invoice_date, posting_date, status, shop, statement_id, statement_date.",
+      "connection": "TBD -- NetSuite REST/SuiteQL connector"
+    }
+  }
+}
+

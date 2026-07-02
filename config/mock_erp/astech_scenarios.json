@@ -1,0 +1,80 @@
+{
+  "_comment": "Drives the Mock ERP Generator (03_mock_erp_generator.py) end to end. Nothing about scenario mix, mutation behavior, or randomness lives in the notebook -- it all reads from here. Percentages are targets applied to the Silver VENDOR_STATEMENT population for this vendor/period; the generator rounds to whole invoices and logs the exact assignment to the mutation manifest.",
+
+  "vendor_id": "ASTECH",
+  "generator_version": "1.0",
+  "random_seed": 42,
+
+  "scenario_mix": {
+    "exact_match": 0.75,
+    "invoice_revision": 0.05,
+    "missing_invoice": 0.08,
+    "amount_mismatch": 0.05,
+    "duplicate_invoice": 0.03,
+    "vendor_reference_issue": 0.02,
+    "missing_credit": 0.01,
+    "pending_posting": 0.01
+  },
+
+  "mutation_parameters": {
+    "exact_match": {
+      "description": "ERP record mirrors the statement exactly -- vendor, invoice number, amount, RO, shop all agree."
+    },
+    "invoice_revision": {
+      "description": "ERP re-issues the invoice number with a revision suffix; the statement keeps the original. Validates the normalization function (src/normalization.py) resolves this at Level 1.",
+      "suffixes_to_apply": ["-1", "X1", "R"]
+    },
+    "missing_invoice": {
+      "description": "Invoice exists on the vendor statement but is entirely absent from the ERP extract -- expected exception reason: Invoice Missing."
+    },
+    "amount_mismatch": {
+      "description": "ERP amount differs from the statement amount by a random percentage in this range -- expected exception reason: Amount Mismatch.",
+      "variance_min_pct": 0.05,
+      "variance_max_pct": 0.25
+    },
+    "duplicate_invoice": {
+      "description": "The same invoice appears more than once in the ERP extract -- expected exception reason: Duplicate Invoice.",
+      "max_duplicate_copies": 1
+    },
+    "vendor_reference_issue": {
+      "description": "ERP references the work order number instead of the true invoice number -- mirrors the real SIN12307276 / 24419074 case found during Phase 2 extraction. No RO number is carried on this record, so Level 3 cannot rescue it either -- expected exception reason: Invoice Missing."
+    },
+    "missing_credit": {
+      "description": "ERP outstanding amount is reduced by a credit that never appears on the vendor statement -- expected exception reason: Missing Credit.",
+      "credit_min_pct": 0.05,
+      "credit_max_pct": 0.15
+    },
+    "pending_posting": {
+      "description": "Invoice exists on the ERP side but has not finished posting yet -- expected exception reason: Pending Posting.",
+      "status_value": "PENDING"
+    }
+  },
+
+  "erp_status_by_scenario": {
+    "exact_match": "POSTED",
+    "invoice_revision": "POSTED",
+    "amount_mismatch": "POSTED",
+    "duplicate_invoice": "POSTED",
+    "vendor_reference_issue": "POSTED",
+    "missing_credit": "POSTED",
+    "pending_posting": "PENDING"
+  },
+
+  "expected_outcome_by_scenario": {
+    "exact_match": {"match_status": "MATCHED", "match_level": 1, "exception_reason": null},
+    "invoice_revision": {"match_status": "MATCHED", "match_level": 1, "exception_reason": null},
+    "missing_invoice": {"match_status": "EXCEPTION", "match_level": null, "exception_reason": "Invoice Missing"},
+    "amount_mismatch": {"match_status": "EXCEPTION", "match_level": null, "exception_reason": "Amount Mismatch"},
+    "duplicate_invoice": {"match_status": "EXCEPTION", "match_level": null, "exception_reason": "Duplicate Invoice"},
+    "vendor_reference_issue": {"match_status": "EXCEPTION", "match_level": null, "exception_reason": "Invoice Missing"},
+    "missing_credit": {"match_status": "EXCEPTION", "match_level": null, "exception_reason": "Missing Credit"},
+    "pending_posting": {"match_status": "EXCEPTION", "match_level": null, "exception_reason": "Pending Posting"}
+  },
+
+  "field_generation": {
+    "posting_date_lag_days_min": 1,
+    "posting_date_lag_days_max": 5,
+    "po_number_prefix": "PO-ASTECH-",
+    "currency": "USD"
+  }
+}

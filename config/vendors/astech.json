@@ -1,0 +1,41 @@
+{
+  "vendor_id": "ASTECH",
+  "vendor_name": "Repairify, Inc dba asTech",
+  "statement_format": "tabular_pdf",
+  "requires_ocr": false,
+  "source_column_mapping": {
+    "Invoice Date": "invoice_date",
+    "Invoice #": "invoice_number",
+    "Work Order #": "work_order_number",
+    "RO #": "ro_number",
+    "Outstanding Amount": "outstanding_amount",
+    "Due Date": "due_date"
+  },
+  "shop_extraction": {
+    "method": "statement_header",
+    "pattern": "Vive Collision - (.*)"
+  },
+  "reference_source": {
+    "poc_stand_in": "payment_voucher",
+    "production_source": "netsuite"
+  },
+  "period": {
+    "start_date": "2026-05-01",
+    "end_date": "2026-05-31"
+  },
+  "date_format": "MM/dd/yyyy",
+  "currency": "USD",
+  "amount_format": {
+    "decimal_separator": ".",
+    "thousands_separator": ",",
+    "currency_symbol": "$"
+  },
+  "invoice_pattern": "^SIN\\d+$",
+  "credit_prefix": "Bill Credit #",
+  "revision_suffixes": [
+    "X\\d+$",
+    "-\\d+$",
+    "R$"
+  ]
+}
+

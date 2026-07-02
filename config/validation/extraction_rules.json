@@ -1,0 +1,25 @@
+{
+  "_comment": "Structural validation rules for AI-extracted invoice records. Deliberately separate from config/ai/gemini.json -- these rules apply regardless of which AI provider produced the extraction, or even if the legacy pdfplumber fallback did. Nothing provider-specific belongs in this file.",
+
+  "required_fields": [
+    "vendor",
+    "invoice_number",
+    "amount",
+    "outstanding_amount",
+    "invoice_date",
+    "shop"
+  ],
+
+  "numeric_fields": ["amount", "outstanding_amount"],
+
+  "date_fields": ["invoice_date", "due_date"],
+
+  "duplicate_key_fields": ["vendor", "invoice_number", "amount"],
+
+  "confidence_threshold": 0.75,
+
+  "_notes": {
+    "confidence_threshold": "Records with extraction_confidence below this go to validation_document_review_queue, not Bronze. A record with NO confidence value supplied (provider didn't return one) is not rejected for that reason alone -- see src/validation/extraction_validator.py.",
+    "date_fields": "Validated loosely here (does it look date-shaped?) -- full parsing against the vendor's actual date_format happens in Silver, per 'no AI inside Silver, keep Silver exactly as designed'."
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "_comment": "No API parameters are hardcoded anywhere in src/ai/. Every value the client uses to build a request comes from this file. The API key itself is NEVER stored here -- see api_key_env_var.",
+
+  "provider": "gemini",
+  "model": "gemini-2.0-flash",
+  "api_key_env_var": "GEMINI_API_KEY",
+  "endpoint_template": "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}",
+
+  "temperature": 0.1,
+  "max_output_tokens": 4096,
+  "timeout_seconds": 30,
+  "response_mime_type": "application/json",
+
+  "retry_policy": {
+    "max_retries": 3,
+    "backoff_seconds": 2,
+    "backoff_multiplier": 2,
+    "retry_on_status_codes": [429, 500, 502, 503, 504]
+  },
+
+  "_notes": {
+    "temperature": "Kept low (0.1), not 0, because Gemini's extraction still benefits from a little flexibility across varied PDF layouts -- but this NEVER touches the matching engine, which stays 100% rule-based Spark regardless of what Gemini returns.",
+    "future_providers": "Adding Azure OpenAI or Claude later means a new config/ai/<provider>.json plus a new src/ai/<provider>_client.py implementing AIClient. No other file changes."
+  }
+}
