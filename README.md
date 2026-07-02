@@ -389,19 +389,18 @@ python3 tests/test_review_queue.py
 python3 tests/test_scenario_assignment.py
 python3 tests/test_mutations.py
 python3 tests/test_generator.py
-python3 tests/test_matching_engine.py
 python3 tests/test_pipeline_runner.py
 python3 tests/test_pipeline_checks.py
 ```
-All thirteen are self-contained (no pytest dependency, no network access,
+All twelve are self-contained (no pytest dependency, no network access,
 no Spark session required) and exit non-zero on any failure.
 
 ## Execution & Validation
 
 ### Confirmed execution order
 
-This is the complete implemented flow today -- nothing past step 6 exists
-yet (no AI Exception Analysis, no AI Executive Summary):
+This is the complete implemented flow today -- nothing past step 5 exists
+yet (no Matching Engine, no Gold tables):
 
 | # | Notebook | Reads | Writes |
 |---|---|---|---|
@@ -410,19 +409,18 @@ yet (no AI Exception Analysis, no AI Executive Summary):
 | 3 | `02_silver_normalization_statement.py` | `bronze_vendor_statement_raw` | `silver_reconciliation_standard` (`record_source='VENDOR_STATEMENT'`) |
 | 4 | `03_mock_erp_generator.py` | `silver_reconciliation_standard` (`VENDOR_STATEMENT`) | `bronze_internal_erp_raw`, `validation_mutation_manifest` |
 | 5 | `04_silver_normalization_erp.py` | `bronze_internal_erp_raw` | `silver_reconciliation_standard` (`record_source='INTERNAL_ERP'`) |
-| 6 | `05_matching_engine.py` | `silver_reconciliation_standard` (both sides) | `gold_matched_invoices`, `gold_exceptions`, `gold_vendor_summary`, `gold_shop_summary`, `gold_reconciliation_summary` |
 
 Step 2 internally goes PDF → Gemini Extraction (`src/ai/extraction_service.py`)
 → Validation (`src/validation/extraction_validator.py`) → Bronze, per the
-"AI Service Layer" flow diagram above; steps 4 and 6 have no AI involvement
-at all (see "Mock ERP Generator" and "Matching Engine" above).
+"AI Service Layer" flow diagram above; step 4 has no AI involvement at all
+(see "Mock ERP Generator" above).
 
 ### Running the full pipeline
 
 ```
 python scripts/run_pipeline.py
 ```
-Runs all six stages above, in order, in one Python process, against the
+Runs all five stages above, in order, in one Python process, against the
 committed sample PDF. Stops immediately if any stage raises (later stages
 never run), printing which stage failed and why. Prints, per stage: a
 start banner, elapsed time, and a row count for every table that stage is
@@ -443,7 +441,7 @@ locally" below for known local Delta/Maven limitations.
 python scripts/run_pipeline.py --pdf path/to/your_statement.pdf \
     [--statement-id CUSTOM-ID] [--statement-period 2026-06]
 ```
-Runs the exact same six stages against a PDF you supply instead of the
+Runs the exact same five stages against a PDF you supply instead of the
 committed sample. Prints this flow banner up front, then the same
 per-stage output as a normal run:
 ```
@@ -457,9 +455,6 @@ Validation
       |
       v
 Bronze Vendor -> Silver Vendor -> Mock ERP Generation -> Bronze ERP -> Silver ERP
-      |
-      v
-Matching Engine (no AI) -> Gold tables
 ```
 `--statement-id` / `--statement-period` are optional and independent of
 each other and of `--pdf` — anything not given falls back to
@@ -488,10 +483,6 @@ of a full pipeline re-run. Prints one `[PASS]`/`[FAIL]` line per table:
 | Review Queue | informational — any count (including 0) passes; a clean AI run or a pdfplumber-only run both legitimately produce 0 |
 | AI Audit Log | informational — any count passes; 0 is correct when `pdfplumber_tabular` was the active method |
 | Mutation Manifest | at least 1 row — the Mock ERP Generator always writes exactly one per statement invoice it read |
-| Gold Matched Invoices | at least 1 row, and every row has `matched_rule` + `match_reason` populated |
-| Gold Exceptions | at least 1 row, and every row has `exception_category` + `deterministic_reason` populated |
-| Gold Vendor / Shop Summary | at least 1 row each |
-| Gold Reconciliation Summary | at least 1 row, and `overall_status` is one of `RECONCILED` / `MINOR_VARIANCE` / `EXCEPTIONS_PRESENT` |
 
 Every check reads via `spark.table(name).collect()` and filters in plain
 Python — `src/validation/pipeline_checks.py` never imports `pyspark`
@@ -517,14 +508,6 @@ without needing Spark installed at all.
 - **Silver Normalization (ERP)** — prints Bronze vs. Silver row count and
   total (must match exactly), plus a check that `posting_date` is null
   if and only if `status = 'PENDING'`.
-- **Matching Engine** — prints how many statement invoices were classified,
-  the matched/exception split, how many ERP records were orphaned (no
-  statement counterpart), row counts written to every Gold table, and a
-  per-`scenario_type` breakdown graded against
-  `validation_mutation_manifest` (`[OK]` or `[MISMATCH]` per scenario,
-  with the specific mismatching rows printed if any) — the notebook's own
-  final assertion fails the run if the engine disagrees with the manifest
-  on even one invoice.
 
 ## Running the pipeline locally (for development/testing only)
 

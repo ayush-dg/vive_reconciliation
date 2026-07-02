@@ -11,6 +11,7 @@ pipeline end to end, in one Python process, in execution order:
     02_silver_normalization_statement.py (Bronze -> Silver, VENDOR_STATEMENT)
     03_mock_erp_generator.py             (Silver -> Bronze ERP + manifest, no AI)
     04_silver_normalization_erp.py       (Bronze ERP -> Silver, INTERNAL_ERP)
+    05_matching_engine.py                (Silver both sides -> every Gold table, no AI)
 
 All sequencing logic lives in src/pipeline/runner.py (unit-tested without
 Spark); this script is a thin CLI wrapper: parse args, wire up print-based
