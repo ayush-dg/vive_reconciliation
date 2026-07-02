@@ -310,10 +310,23 @@ def extract_vendor_statement_via_ai(
 
 
 # ---- CELL 6: Dispatch -- run the configured extraction method -----------
-STATEMENT_ID = "ASTECH-COLLEX-2026-05"
-STATEMENT_PERIOD = "2026-05"
-SOURCE_FILE = "astech_vendor_statement_may2026.pdf"
-PDF_PATH = f"sample_data/{SOURCE_FILE}"
+# Same environment-detection spirit as Cell 1's `try: spark` -- lets
+# scripts/run_pipeline.py's Demo Mode point this notebook at a caller-
+# supplied PDF (and, optionally, a different statement_id/period) by
+# pre-binding any of these names in the shared exec namespace before this
+# notebook runs. Each name defaults independently (via globals()
+# membership, not try/except) so a partial override -- e.g. a different
+# PDF with the default statement_id -- works as expected. A normal/
+# default run never pre-sets any of them, so every one falls through to
+# the exact same hardcoded sample-PDF values as before.
+if "STATEMENT_ID" not in globals():
+    STATEMENT_ID = "ASTECH-COLLEX-2026-05"
+if "STATEMENT_PERIOD" not in globals():
+    STATEMENT_PERIOD = "2026-05"
+if "SOURCE_FILE" not in globals():
+    SOURCE_FILE = "astech_vendor_statement_may2026.pdf"
+if "PDF_PATH" not in globals():
+    PDF_PATH = f"sample_data/{SOURCE_FILE}"
 
 if extraction_config["active_method"] == "ai_extraction":
     ai_client = GeminiClient(gemini_config)

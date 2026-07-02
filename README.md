@@ -19,8 +19,11 @@ Generator (`03_mock_erp_generator.py`, no AI involved) simulates a
 NetSuite export by mutating Silver's `VENDOR_STATEMENT` rows per
 `config/mock_erp/astech_scenarios.json`, and `04_silver_normalization_erp.py`
 normalizes that into `silver_reconciliation_standard` tagged
-`record_source = 'INTERNAL_ERP'` -- see "Mock ERP Generator" below. Next:
-the deterministic Matching Engine and Gold population.
+`record_source = 'INTERNAL_ERP'` -- see "Mock ERP Generator" below. The
+whole implemented pipeline (schema setup through ERP-side Silver
+normalization) can now be run end to end with one command, and its output
+automatically validated -- see "Execution & Validation" below. Next: the
+deterministic Matching Engine and Gold population.
 
 This is a PoC, not a production system, but every design decision is
 made as if it will run in one. Code is written to be pasted directly
@@ -81,10 +84,15 @@ vive_reconciliation_poc/
 │   ├── validation/
 │   │   ├── extraction_validator.py  # deterministic gate: structural checks + confidence evaluation + duplicate detection
 │   │   └── review_queue.py          # Phase B: turns a rejected record into one validation_document_review_queue row
-│   └── mock_erp/                    # no AI, no Spark -- pure Python, fully unit-tested
-│       ├── scenario_assignment.py   # proportionally + reproducibly assigns each statement invoice a scenario, seeded
-│       ├── mutations.py             # one function per scenario -- the ERP-side fields that vary by scenario
-│       └── generator.py             # orchestrates assignment + mutation + manifest construction; the only entry point notebooks call
+│   ├── mock_erp/                    # no AI, no Spark -- pure Python, fully unit-tested
+│   │   ├── scenario_assignment.py   # proportionally + reproducibly assigns each statement invoice a scenario, seeded
+│   │   ├── mutations.py             # one function per scenario -- the ERP-side fields that vary by scenario
+│   │   └── generator.py             # orchestrates assignment + mutation + manifest construction; the only entry point notebooks call
+│   └── pipeline/
+│       └── runner.py                # PIPELINE_STAGES + run_pipeline() -- sequences the notebooks; executor/table_counter are injectable, no Spark needed to test
+├── scripts/                          # development/demo tools -- not Fabric deployment artifacts, not tested library code
+│   ├── run_pipeline.py               # CLI: run the full pipeline (or Demo Mode with --pdf) in one command
+│   └── validate_pipeline.py          # CLI: check the CURRENT lakehouse state without re-running anything
 ├── tests/
 │   ├── test_normalization.py
 │   ├── test_gemini_client.py        # exercised via injected fake transport -- no network access needed
@@ -95,7 +103,9 @@ vive_reconciliation_poc/
 │   ├── test_review_queue.py         # Phase B
 │   ├── test_scenario_assignment.py  # proportions, reproducibility, no Spark
 │   ├── test_mutations.py            # one test group per scenario, no Spark
-│   └── test_generator.py            # full runs against the REAL astech_scenarios.json, no Spark
+│   ├── test_generator.py            # full runs against the REAL astech_scenarios.json, no Spark
+│   ├── test_pipeline_runner.py      # stage sequencing + stop-on-failure via injected fake executor, no Spark
+│   └── test_pipeline_checks.py      # validation utilities via a trivial fake spark, no pyspark needed
 ├── sample_data/
 │   ├── astech_vendor_statement_may2026.pdf
 │   └── astech_payment_voucher_may2026.pdf   # retained for the dormant payment_voucher adapter
@@ -278,9 +288,125 @@ python3 tests/test_review_queue.py
 python3 tests/test_scenario_assignment.py
 python3 tests/test_mutations.py
 python3 tests/test_generator.py
+python3 tests/test_pipeline_runner.py
+python3 tests/test_pipeline_checks.py
 ```
-All ten are self-contained (no pytest dependency, no network access,
+All twelve are self-contained (no pytest dependency, no network access,
 no Spark session required) and exit non-zero on any failure.
+
+## Execution & Validation
+
+### Confirmed execution order
+
+This is the complete implemented flow today -- nothing past step 5 exists
+yet (no Matching Engine, no Gold tables):
+
+| # | Notebook | Reads | Writes |
+|---|---|---|---|
+| 1 | `00_setup_lakehouse_schema.py` | -- | every Bronze/Silver/Gold/validation/audit table (`CREATE TABLE IF NOT EXISTS`, idempotent) |
+| 2 | `01_bronze_ingestion.py` | Vendor Statement PDF | `bronze_vendor_statement_raw`, `validation_document_review_queue`, `ai_audit_log` |
+| 3 | `02_silver_normalization_statement.py` | `bronze_vendor_statement_raw` | `silver_reconciliation_standard` (`record_source='VENDOR_STATEMENT'`) |
+| 4 | `03_mock_erp_generator.py` | `silver_reconciliation_standard` (`VENDOR_STATEMENT`) | `bronze_internal_erp_raw`, `validation_mutation_manifest` |
+| 5 | `04_silver_normalization_erp.py` | `bronze_internal_erp_raw` | `silver_reconciliation_standard` (`record_source='INTERNAL_ERP'`) |
+
+Step 2 internally goes PDF → Gemini Extraction (`src/ai/extraction_service.py`)
+→ Validation (`src/validation/extraction_validator.py`) → Bronze, per the
+"AI Service Layer" flow diagram above; step 4 has no AI involvement at all
+(see "Mock ERP Generator" above).
+
+### Running the full pipeline
+
+```
+python scripts/run_pipeline.py
+```
+Runs all five stages above, in order, in one Python process, against the
+committed sample PDF. Stops immediately if any stage raises (later stages
+never run), printing which stage failed and why. Prints, per stage: a
+start banner, elapsed time, and a row count for every table that stage is
+expected to write; prints a final summary table (stage / OK-or-FAILED /
+elapsed) and total elapsed time; then runs the validation report (below)
+automatically unless `--skip-validation` is passed. Exit code is non-zero
+if any stage fails OR any validation check fails.
+
+All sequencing logic lives in `src/pipeline/runner.py` (`run_pipeline()`,
+`PIPELINE_STAGES`) — `scripts/run_pipeline.py` is a thin CLI wrapper
+around it. Requires `pyspark` and `pdfplumber` installed and a
+Fabric-compatible or local Spark environment; see "Running the pipeline
+locally" below for known local Delta/Maven limitations.
+
+### Demo Mode
+
+```
+python scripts/run_pipeline.py --pdf path/to/your_statement.pdf \
+    [--statement-id CUSTOM-ID] [--statement-period 2026-06]
+```
+Runs the exact same five stages against a PDF you supply instead of the
+committed sample. Prints this flow banner up front, then the same
+per-stage output as a normal run:
+```
+Vendor Statement PDF
+      |
+      v
+Gemini Extraction    (pdfplumber fallback if AI fails)
+      |
+      v
+Validation
+      |
+      v
+Bronze Vendor -> Silver Vendor -> Mock ERP Generation -> Bronze ERP -> Silver ERP
+```
+`--statement-id` / `--statement-period` are optional and independent of
+each other and of `--pdf` — anything not given falls back to
+`01_bronze_ingestion.py`'s default (`ASTECH-COLLEX-2026-05` / `2026-05`).
+This works via a small, additive shim in that notebook's Cell 6
+(`if "PDF_PATH" not in globals(): PDF_PATH = ...`, one per identifier) —
+the exact same environment-detection idiom the notebook already uses for
+`spark`. A default run (no `--pdf`) never touches this path at all.
+
+### How to validate outputs
+
+```
+python scripts/validate_pipeline.py
+```
+Checks whatever is CURRENTLY in the lakehouse against
+`src/validation/pipeline_checks.py` — does not re-run anything. Useful
+after a manual Fabric run, or to re-check state without paying the cost
+of a full pipeline re-run. Prints one `[PASS]`/`[FAIL]` line per table:
+
+| Check | Requirement |
+|---|---|
+| Bronze Vendor Statement | at least 1 row |
+| Silver Vendor Statement | at least 1 `VENDOR_STATEMENT` row, zero with an unparsed `invoice_date` |
+| Bronze Internal ERP | at least 1 row |
+| Silver Internal ERP | at least 1 `INTERNAL_ERP` row, zero with an unparsed `invoice_date` |
+| Review Queue | informational — any count (including 0) passes; a clean AI run or a pdfplumber-only run both legitimately produce 0 |
+| AI Audit Log | informational — any count passes; 0 is correct when `pdfplumber_tabular` was the active method |
+| Mutation Manifest | at least 1 row — the Mock ERP Generator always writes exactly one per statement invoice it read |
+
+Every check reads via `spark.table(name).collect()` and filters in plain
+Python — `src/validation/pipeline_checks.py` never imports `pyspark`
+itself, so its logic is unit-tested (`tests/test_pipeline_checks.py`)
+without needing Spark installed at all.
+
+### Expected output at each stage (successful run)
+
+- **Setup Lakehouse Schema** — prints the full list of created tables; no
+  row counts (nothing populated yet).
+- **Bronze Ingestion** — prints which extraction method is active, how
+  many rows landed in Bronze vs. were flagged for review, and how many AI
+  calls were logged; ends with the 202-row/$13,860.79 baseline check
+  (informational once AI extraction is active — see that notebook's
+  Cell 12 for why a lower count isn't necessarily a regression).
+- **Silver Normalization (Statement)** — prints Bronze vs. Silver row
+  count and total (must match exactly), plus how many rows are sitting in
+  the review queue for context.
+- **Mock ERP Generator** — prints the achieved scenario mix against
+  `config/mock_erp/astech_scenarios.json`'s configured targets, and
+  confirms Bronze ERP's row count matches the generator's own expected
+  emission count.
+- **Silver Normalization (ERP)** — prints Bronze vs. Silver row count and
+  total (must match exactly), plus a check that `posting_date` is null
+  if and only if `status = 'PENDING'`.
 
 ## Running the pipeline locally (for development/testing only)
 
@@ -289,4 +415,6 @@ needs to be created locally. Locally, Delta's JVM jars require Maven
 Central, which most sandboxed environments can't reach — swap
 `USING DELTA` for `USING PARQUET` in a scratch copy to validate DDL and
 logic; the notebooks committed here use `USING DELTA`, correct for
-actual Fabric deployment.
+actual Fabric deployment. `scripts/run_pipeline.py` and
+`scripts/validate_pipeline.py` inherit this same limitation since they
+run these same notebooks.
