@@ -1,0 +1,13 @@
+{
+  "_comment": "Drives 05_matching_engine.py's thresholds -- nothing about variance tolerance or amount comparison lives in the notebook or in src/matching/engine.py itself. Vendor-scoped like every other config file in this repo.",
+
+  "vendor_id": "ASTECH",
+
+  "amount_comparison_tolerance": 0.01,
+  "minor_variance_threshold_pct": 0.01,
+
+  "_notes": {
+    "amount_comparison_tolerance": "Two outstanding_amount values are considered equal if they differ by no more than this (absolute dollars) -- guards against floating-point rounding artifacts from upstream variance math, not a business tolerance for genuine mismatches.",
+    "minor_variance_threshold_pct": "gold_reconciliation_summary.overall_status is MINOR_VARIANCE (not EXCEPTIONS_PRESENT) only when there are zero exceptions AND abs(difference)/statement_total is at or below this fraction -- e.g. 0.01 = 1%."
+  }
+}

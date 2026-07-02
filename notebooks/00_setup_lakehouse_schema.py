@@ -22,6 +22,16 @@
 #   - New gold_reconciliation_summary table for management reporting.
 #   - page_number / row_number added to both Bronze tables for
 #     extraction-level traceability.
+#
+# Matching Engine phase changes:
+#   - gold_matched_invoices gains matched_rule and match_reason (additive,
+#     nullable) -- every matched record now explains which rule fired and
+#     why, per src/matching/engine.py.
+#   - gold_exceptions' exception_reason is renamed exception_category (Gold
+#     was never populated before this phase, so this is a clean rename,
+#     not a breaking schema change) and gains deterministic_reason
+#     (detailed explanation) and reference_record_id (closest ERP
+#     candidate, when one exists).
 # ==========================================================================
 
 # ---- CELL 1: Environment setup (Fabric-safe) ----------------------------
@@ -154,6 +164,8 @@ CREATE TABLE IF NOT EXISTS gold_matched_invoices (
     ro_number            STRING,
     amount               DECIMAL(12,2),
     match_level          INT,       -- 1, 2, or 3
+    matched_rule         STRING,    -- Matching Engine: short code, e.g. 'LEVEL_1_FULL_MATCH' -- see src/matching/engine.py
+    match_reason         STRING,    -- Matching Engine: human-readable explanation of why this pair matched
     match_status         STRING,    -- always 'MATCHED'
     statement_record_id  STRING,    -- FK -> silver_reconciliation_standard (VENDOR_STATEMENT side)
     reference_record_id  STRING,    -- FK -> silver_reconciliation_standard (INTERNAL_ERP side)
@@ -175,9 +187,11 @@ CREATE TABLE IF NOT EXISTS gold_exceptions (
     ro_number            STRING,
     amount               DECIMAL(12,2),
     match_status         STRING,    -- always 'EXCEPTION'
-    exception_reason     STRING,
+    exception_category   STRING,    -- Matching Engine: 'Invoice Missing' | 'Amount Mismatch' | 'Duplicate Invoice' | 'Missing Credit' | 'Pending Posting' | 'Unmatched Record' -- matches config/mock_erp/astech_scenarios.json's expected_exception_reason vocabulary exactly, so grading against validation_mutation_manifest is a literal string comparison. Renamed from exception_reason (Gold was never populated before this phase, so this is a clean rename, not a breaking change).
+    deterministic_reason STRING,    -- Matching Engine: human-readable explanation of why this specific record fell into that category -- never AI-generated (see src/matching/engine.py); AI-generated narrative comes later, in a different column, in a future phase
+    reference_record_id  STRING,    -- FK -> silver_reconciliation_standard (INTERNAL_ERP side) -- the closest ERP candidate this exception is based on, when exactly one exists; NULL for Duplicate Invoice (ambiguous which copy), Invoice Missing, and Unmatched Record (no statement counterpart)
     exception_status     STRING,    -- Open -> Investigating -> Resolved -> Closed
-    statement_record_id  STRING,
+    statement_record_id  STRING,    -- FK -> silver_reconciliation_standard (VENDOR_STATEMENT side) -- NULL for Unmatched Record (no statement counterpart at all)
     source_file           STRING,    -- denormalized lineage
     statement_id          STRING,    -- denormalized lineage
     date_raised          TIMESTAMP,

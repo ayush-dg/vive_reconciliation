@@ -58,6 +58,14 @@ PIPELINE_STAGES = [
         "notebooks/04_silver_normalization_erp.py",
         ["silver_reconciliation_standard"],
     ),
+    Stage(
+        "Matching Engine",
+        "notebooks/05_matching_engine.py",
+        [
+            "gold_matched_invoices", "gold_exceptions", "gold_vendor_summary",
+            "gold_shop_summary", "gold_reconciliation_summary",
+        ],
+    ),
 ]
 
 

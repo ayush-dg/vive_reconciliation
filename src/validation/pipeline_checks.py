@@ -32,6 +32,15 @@ What "populated correctly" means here, per table
 - Mutation Manifest: at least one row exists -- the Mock ERP Generator
   always writes exactly one manifest row per statement invoice it read,
   so zero rows here means the generator did not actually run.
+- Gold Matched Invoices / Gold Exceptions: at least one row exists (the
+  current scenario mix always produces both some matches and some
+  exceptions), and every row has its explainability fields populated --
+  matched_rule/match_reason for matches, exception_category/
+  deterministic_reason for exceptions -- since a NULL there means the
+  Matching Engine produced a row without explaining itself.
+- Gold Vendor / Shop / Reconciliation Summary: at least one row exists;
+  Reconciliation Summary's overall_status must be one of the three values
+  the Matching Engine ever assigns.
 """
 
 from dataclasses import dataclass
@@ -120,6 +129,69 @@ def check_mutation_manifest(spark) -> CheckResult:
     return CheckResult("Mutation Manifest", True, f"{len(rows)} row(s)", len(rows))
 
 
+def check_gold_matched_invoices(spark) -> CheckResult:
+    rows, error = _rows(spark, "gold_matched_invoices")
+    if error:
+        return CheckResult("Gold Matched Invoices", False, f"query failed: {error}")
+    if not rows:
+        return CheckResult("Gold Matched Invoices", False, "table is empty -- run 05_matching_engine.py", 0)
+    unexplained = sum(1 for r in rows if r.get("matched_rule") is None or r.get("match_reason") is None)
+    passed = unexplained == 0
+    details = f"{len(rows)} row(s)"
+    if not passed:
+        details += f", {unexplained} missing matched_rule/match_reason"
+    return CheckResult("Gold Matched Invoices", passed, details, len(rows))
+
+
+def check_gold_exceptions(spark) -> CheckResult:
+    rows, error = _rows(spark, "gold_exceptions")
+    if error:
+        return CheckResult("Gold Exceptions", False, f"query failed: {error}")
+    if not rows:
+        return CheckResult("Gold Exceptions", False, "table is empty -- run 05_matching_engine.py", 0)
+    unexplained = sum(1 for r in rows if r.get("exception_category") is None or r.get("deterministic_reason") is None)
+    passed = unexplained == 0
+    details = f"{len(rows)} row(s)"
+    if not passed:
+        details += f", {unexplained} missing exception_category/deterministic_reason"
+    return CheckResult("Gold Exceptions", passed, details, len(rows))
+
+
+def check_gold_vendor_summary(spark) -> CheckResult:
+    rows, error = _rows(spark, "gold_vendor_summary")
+    if error:
+        return CheckResult("Gold Vendor Summary", False, f"query failed: {error}")
+    if not rows:
+        return CheckResult("Gold Vendor Summary", False, "table is empty -- run 05_matching_engine.py", 0)
+    return CheckResult("Gold Vendor Summary", True, f"{len(rows)} row(s)", len(rows))
+
+
+def check_gold_shop_summary(spark) -> CheckResult:
+    rows, error = _rows(spark, "gold_shop_summary")
+    if error:
+        return CheckResult("Gold Shop Summary", False, f"query failed: {error}")
+    if not rows:
+        return CheckResult("Gold Shop Summary", False, "table is empty -- run 05_matching_engine.py", 0)
+    return CheckResult("Gold Shop Summary", True, f"{len(rows)} row(s)", len(rows))
+
+
+VALID_OVERALL_STATUSES = {"RECONCILED", "MINOR_VARIANCE", "EXCEPTIONS_PRESENT"}
+
+
+def check_gold_reconciliation_summary(spark) -> CheckResult:
+    rows, error = _rows(spark, "gold_reconciliation_summary")
+    if error:
+        return CheckResult("Gold Reconciliation Summary", False, f"query failed: {error}")
+    if not rows:
+        return CheckResult("Gold Reconciliation Summary", False, "table is empty -- run 05_matching_engine.py", 0)
+    invalid_status = sum(1 for r in rows if r.get("overall_status") not in VALID_OVERALL_STATUSES)
+    passed = invalid_status == 0
+    details = f"{len(rows)} row(s)"
+    if not passed:
+        details += f", {invalid_status} with an unrecognized overall_status"
+    return CheckResult("Gold Reconciliation Summary", passed, details, len(rows))
+
+
 def run_all_checks(spark) -> list:
     return [
         check_bronze_vendor_statement(spark),
@@ -129,4 +201,9 @@ def run_all_checks(spark) -> list:
         check_review_queue(spark),
         check_ai_audit_log(spark),
         check_mutation_manifest(spark),
+        check_gold_matched_invoices(spark),
+        check_gold_exceptions(spark),
+        check_gold_vendor_summary(spark),
+        check_gold_shop_summary(spark),
+        check_gold_reconciliation_summary(spark),
     ]

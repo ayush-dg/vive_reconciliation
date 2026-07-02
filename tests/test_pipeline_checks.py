@@ -19,6 +19,11 @@ from src.validation.pipeline_checks import (
     check_review_queue,
     check_ai_audit_log,
     check_mutation_manifest,
+    check_gold_matched_invoices,
+    check_gold_exceptions,
+    check_gold_vendor_summary,
+    check_gold_shop_summary,
+    check_gold_reconciliation_summary,
     run_all_checks,
 )
 
@@ -154,10 +159,101 @@ def test_mutation_manifest_passes_when_populated():
     assert result.row_count == 5
 
 
+# ---- Gold tables --------------------------------------------------------------
+
+def test_gold_matched_invoices_fails_when_empty():
+    spark = _spark(gold_matched_invoices=[])
+    result = check_gold_matched_invoices(spark)
+    assert result.passed is False
+
+
+def test_gold_matched_invoices_passes_when_fully_explained():
+    spark = _spark(gold_matched_invoices=[
+        {"matched_rule": "LEVEL_1_FULL_MATCH", "match_reason": "everything agrees"},
+    ])
+    result = check_gold_matched_invoices(spark)
+    assert result.passed is True
+    assert result.row_count == 1
+
+
+def test_gold_matched_invoices_fails_when_missing_explainability_fields():
+    spark = _spark(gold_matched_invoices=[
+        {"matched_rule": "LEVEL_1_FULL_MATCH", "match_reason": "everything agrees"},
+        {"matched_rule": None, "match_reason": None},
+    ])
+    result = check_gold_matched_invoices(spark)
+    assert result.passed is False
+    assert "missing matched_rule/match_reason" in result.details
+
+
+def test_gold_exceptions_fails_when_empty():
+    spark = _spark(gold_exceptions=[])
+    result = check_gold_exceptions(spark)
+    assert result.passed is False
+
+
+def test_gold_exceptions_passes_when_fully_explained():
+    spark = _spark(gold_exceptions=[
+        {"exception_category": "Amount Mismatch", "deterministic_reason": "amounts differ"},
+    ])
+    result = check_gold_exceptions(spark)
+    assert result.passed is True
+
+
+def test_gold_exceptions_fails_when_missing_explainability_fields():
+    spark = _spark(gold_exceptions=[{"exception_category": None, "deterministic_reason": None}])
+    result = check_gold_exceptions(spark)
+    assert result.passed is False
+    assert "missing exception_category/deterministic_reason" in result.details
+
+
+def test_gold_vendor_summary_fails_when_empty():
+    spark = _spark(gold_vendor_summary=[])
+    result = check_gold_vendor_summary(spark)
+    assert result.passed is False
+
+
+def test_gold_vendor_summary_passes_when_populated():
+    spark = _spark(gold_vendor_summary=[{"vendor_id": "ASTECH"}])
+    result = check_gold_vendor_summary(spark)
+    assert result.passed is True
+
+
+def test_gold_shop_summary_fails_when_empty():
+    spark = _spark(gold_shop_summary=[])
+    result = check_gold_shop_summary(spark)
+    assert result.passed is False
+
+
+def test_gold_shop_summary_passes_when_populated():
+    spark = _spark(gold_shop_summary=[{"shop": "Collex Auto Body"}])
+    result = check_gold_shop_summary(spark)
+    assert result.passed is True
+
+
+def test_gold_reconciliation_summary_fails_when_empty():
+    spark = _spark(gold_reconciliation_summary=[])
+    result = check_gold_reconciliation_summary(spark)
+    assert result.passed is False
+
+
+def test_gold_reconciliation_summary_passes_with_a_valid_status():
+    spark = _spark(gold_reconciliation_summary=[{"overall_status": "RECONCILED"}])
+    result = check_gold_reconciliation_summary(spark)
+    assert result.passed is True
+
+
+def test_gold_reconciliation_summary_fails_on_an_unrecognized_status():
+    spark = _spark(gold_reconciliation_summary=[{"overall_status": "SOMETHING_ELSE"}])
+    result = check_gold_reconciliation_summary(spark)
+    assert result.passed is False
+    assert "unrecognized overall_status" in result.details
+
+
 # ---- run_all_checks ----------------------------------------------------------
 
-def test_run_all_checks_returns_seven_results_in_a_stable_order():
-    spark = _spark(
+def _fully_passing_tables():
+    return dict(
         bronze_vendor_statement_raw=[{"raw_invoice_number": "SIN1"}],
         silver_reconciliation_standard=[
             {"record_source": "VENDOR_STATEMENT", "invoice_date": "2026-05-01"},
@@ -167,29 +263,36 @@ def test_run_all_checks_returns_seven_results_in_a_stable_order():
         validation_document_review_queue=[],
         ai_audit_log=[],
         validation_mutation_manifest=[{"scenario_type": "exact_match"}],
+        gold_matched_invoices=[{"matched_rule": "LEVEL_1_FULL_MATCH", "match_reason": "agrees"}],
+        gold_exceptions=[{"exception_category": "Amount Mismatch", "deterministic_reason": "differs"}],
+        gold_vendor_summary=[{"vendor_id": "ASTECH"}],
+        gold_shop_summary=[{"shop": "Collex Auto Body"}],
+        gold_reconciliation_summary=[{"overall_status": "RECONCILED"}],
     )
+
+
+def test_run_all_checks_returns_twelve_results_in_a_stable_order():
+    spark = _spark(**_fully_passing_tables())
     results = run_all_checks(spark)
-    assert len(results) == 7
+    assert len(results) == 12
     assert [r.name for r in results] == [
         "Bronze Vendor Statement", "Silver Vendor Statement", "Bronze Internal ERP",
         "Silver Internal ERP", "Review Queue", "AI Audit Log", "Mutation Manifest",
+        "Gold Matched Invoices", "Gold Exceptions", "Gold Vendor Summary",
+        "Gold Shop Summary", "Gold Reconciliation Summary",
     ]
     assert all(r.passed for r in results)
 
 
 def test_run_all_checks_surfaces_a_failure_without_stopping_the_rest():
-    spark = _spark(
-        bronze_vendor_statement_raw=[],  # fails
-        silver_reconciliation_standard=[{"record_source": "VENDOR_STATEMENT", "invoice_date": "2026-05-01"}],
-        bronze_internal_erp_raw=[{"raw_invoice_number": "SIN1"}],
-        validation_document_review_queue=[],
-        ai_audit_log=[],
-        validation_mutation_manifest=[{"scenario_type": "exact_match"}],
-    )
+    tables = _fully_passing_tables()
+    tables["bronze_vendor_statement_raw"] = []  # fails
+    spark = _spark(**tables)
     results = run_all_checks(spark)
     by_name = {r.name: r for r in results}
     assert by_name["Bronze Vendor Statement"].passed is False
     assert by_name["Bronze Internal ERP"].passed is True  # unaffected by the other failure
+    assert by_name["Gold Reconciliation Summary"].passed is True  # unaffected too
 
 
 if __name__ == "__main__":

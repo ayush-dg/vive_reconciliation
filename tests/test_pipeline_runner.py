@@ -167,8 +167,9 @@ def test_pipeline_stages_cover_the_full_implemented_flow_in_order():
         "notebooks/02_silver_normalization_statement.py",
         "notebooks/03_mock_erp_generator.py",
         "notebooks/04_silver_normalization_erp.py",
+        "notebooks/05_matching_engine.py",
     ]
-    assert len(names) == 5
+    assert len(names) == 6
 
 
 def test_stage_result_default_table_counts_is_independent_per_instance():
