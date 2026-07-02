@@ -7,9 +7,15 @@ Tables, PySpark, Power BI, with Gemini as an isolated AI service for
 document understanding and exception explanation.
 
 **Status:** Phase A complete (AI Service Layer, Validation Layer,
-Review Queue, Audit Logging) plus Bronze ingestion and Silver
-normalization for the vendor statement side. Phase B (wiring AI-based
-extraction end-to-end into `01_bronze_ingestion.py`) is next.
+Review Queue, Audit Logging) plus Silver normalization for the vendor
+statement side. Phase B complete: `ExtractionService` now drives Gemini as
+the primary extraction path for `01_bronze_ingestion.py`, with every
+AI-extracted record routed through the Validation Layer into either Bronze
+or `validation_document_review_queue`, and every AI call logged to
+`ai_audit_log`. The original pdfplumber table extraction is retained,
+unchanged, as a configurable fallback -- see "AI Service Layer" below.
+Next: the Mock ERP Generator, Silver normalization for the ERP side, and
+the deterministic Matching Engine.
 
 This is a PoC, not a production system, but every design decision is
 made as if it will run in one. Code is written to be pasted directly
@@ -42,7 +48,7 @@ vive_reconciliation_poc/
 ├── README.md
 ├── config/
 │   ├── vendors/
-│   │   └── astech.json              # per-vendor parsing/normalization rules -- add a vendor by adding a file here
+│   │   └── astech.json              # per-vendor parsing/normalization rules, plus Phase B's "extraction" block (active_method, fallback_method, fallback_on_ai_failure, derive_amount_from_outstanding) -- add a vendor by adding a file here
 │   ├── erp/
 │   │   └── internal_erp.json        # Internal ERP Dataset adapter switch: mock_erp_generator (active) | payment_voucher (dormant) | netsuite (future)
 │   ├── mock_erp/
@@ -61,16 +67,21 @@ vive_reconciliation_poc/
 │   │   ├── base_client.py           # AIClient abstract interface + AIResponse -- the contract everything else depends on
 │   │   ├── gemini_client.py         # Gemini implementation of AIClient, injectable transport, config-driven retries
 │   │   ├── audit_logger.py          # turns any AIResponse into one ai_audit_log row
-│   │   ├── extraction_service.py    # interface defined -- implementation lands in Phase B
+│   │   ├── extraction_service.py    # Phase B: builds the extraction prompt from vendor config, calls AIClient, parses the response into raw invoice-line dicts
+│   │   ├── extraction_pipeline.py   # Phase B: Spark-free glue -- standardizes raw records, runs them through the Validation Layer, splits Bronze-bound vs. review-queue-bound, dedupes across pages
 │   │   ├── explanation_service.py   # interface defined -- implementation lands in the AI Exception Analysis phase
 │   │   └── summary_service.py       # interface defined -- implementation lands in the AI Executive Summary phase
 │   └── validation/
-│       └── extraction_validator.py  # deterministic gate: structural checks + confidence evaluation + duplicate detection
+│       ├── extraction_validator.py  # deterministic gate: structural checks + confidence evaluation + duplicate detection
+│       └── review_queue.py          # Phase B: turns a rejected record into one validation_document_review_queue row
 ├── tests/
 │   ├── test_normalization.py
 │   ├── test_gemini_client.py        # exercised via injected fake transport -- no network access needed
 │   ├── test_extraction_validator.py
-│   └── test_audit_logger.py
+│   ├── test_audit_logger.py
+│   ├── test_extraction_service.py   # Phase B: exercised via a fake AIClient -- no network access needed
+│   ├── test_extraction_pipeline.py  # Phase B: no Spark, no PDF -- canned ExtractionOutcome inputs
+│   └── test_review_queue.py         # Phase B
 ├── sample_data/
 │   ├── astech_vendor_statement_may2026.pdf
 │   └── astech_payment_voucher_may2026.pdf   # retained for the dormant payment_voucher adapter
@@ -136,8 +147,8 @@ lands with the Matching Engine phase.
 Everything AI-related sits behind `AIClient` (`src/ai/base_client.py`),
 an abstract interface with one method: `generate(prompt) -> AIResponse`.
 `GeminiClient` is the only file that knows Gemini's specific wire format.
-`ExtractionService`, `ExplanationService`, and `SummaryService` will
-depend only on `AIClient` — never on `GeminiClient` — so adding
+`ExtractionService`, `ExplanationService`, and `SummaryService` depend
+only on `AIClient` — never on `GeminiClient` — so adding
 `AzureOpenAIClient` or `ClaudeClient` later means writing one new class,
 not touching extraction, explanation, or summary logic.
 
@@ -145,17 +156,23 @@ not touching extraction, explanation, or summary logic.
 lets `tests/test_gemini_client.py` exercise retry logic, error
 classification, and request-building without any network access —
 useful generally, and a practical necessity in this sandbox, which
-cannot reach Google's Gemini endpoint.
+cannot reach Google's Gemini endpoint. `ExtractionService` is exercised
+the same way, via a fake `AIClient` (`tests/test_extraction_service.py`).
 
-**Ingestion flow (target, Phase B):**
+**Ingestion flow (Phase B, live in `01_bronze_ingestion.py`):**
 ```
-Vendor Statement PDF
+Vendor Statement PDF (per page)
         │
         ▼
-Gemini API (via ExtractionService)
+Gemini API (via ExtractionService, prompt built from the vendor
+config's source_column_mapping)
         │
         ▼
 Structured JSON
+        │
+        ▼
+extraction_pipeline.process_page: standardize (inject vendor/shop,
+rename confidence -> extraction_confidence, derive amount if configured)
         │
         ▼
 Validation (src/validation/extraction_validator.py, config-driven)
@@ -171,7 +188,16 @@ High Conf.   Low Conf. / Validation Failure
 Bronze   validation_document_review_queue
 ```
 Every AI call along the way is logged to `ai_audit_log` via
-`src/ai/audit_logger.py`, regardless of outcome.
+`src/ai/audit_logger.py`, regardless of outcome. If a page's AI call
+fails outright (not a partial validation failure — see
+`extraction_pipeline.process_page`'s docstring), and
+`config/vendors/astech.json`'s `extraction.fallback_on_ai_failure` is
+true, that page is reactively re-extracted with the original pdfplumber
+table parser instead — Bronze either way, no data lost to a transient AI
+failure. Setting `extraction.active_method` to `"pdfplumber_tabular"`
+reverts the whole document to the exact Phase A behavior (no validation
+gate, no review queue, no audit log — that path was never designed to
+need one).
 
 ## Adding a new vendor later (KSI, Fred Beans, VINART, Quirk)
 
@@ -186,8 +212,11 @@ python3 tests/test_normalization.py
 python3 tests/test_gemini_client.py
 python3 tests/test_extraction_validator.py
 python3 tests/test_audit_logger.py
+python3 tests/test_extraction_service.py
+python3 tests/test_extraction_pipeline.py
+python3 tests/test_review_queue.py
 ```
-All four are self-contained (no pytest dependency, no network access,
+All seven are self-contained (no pytest dependency, no network access,
 no Spark session required) and exit non-zero on any failure.
 
 ## Running the pipeline locally (for development/testing only)

@@ -36,6 +36,13 @@
     "X\\d+$",
     "-\\d+$",
     "R$"
-  ]
+  ],
+  "extraction": {
+    "_comment": "Phase B: active_method picks the primary extraction path for 01_bronze_ingestion.py. 'ai_extraction' drives ExtractionService/Gemini (source_column_mapping above becomes the target JSON schema); 'pdfplumber_tabular' reverts to the original Phase A table-extraction path exactly, with no validation/review-queue/audit-log involvement. fallback_on_ai_failure only applies when active_method is 'ai_extraction': a page whose AI call fails outright (not a partial validation failure) is re-extracted with pdfplumber_tabular as a reactive, per-page safety net. derive_amount_from_outstanding is a vendor-shape fact -- asTech's statement has no column distinct from Outstanding Amount -- read by src/ai/extraction_pipeline.py, not hardcoded per-vendor in code.",
+    "active_method": "ai_extraction",
+    "fallback_method": "pdfplumber_tabular",
+    "fallback_on_ai_failure": true,
+    "derive_amount_from_outstanding": true
+  }
 }
 

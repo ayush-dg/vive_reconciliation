@@ -276,7 +276,7 @@ CREATE TABLE IF NOT EXISTS validation_document_review_queue (
     statement_id                  STRING,     -- nullable -- may not be determinable if extraction failed badly
     statement_period              STRING,
     pipeline_stage                STRING,     -- 'AI_EXTRACTION' | 'VALIDATION' | 'SILVER_NORMALIZATION' (future)
-    rejection_category            STRING,     -- 'MALFORMED_JSON' | 'MISSING_MANDATORY_FIELD' | 'INVALID_FIELD_TYPE' | 'LOW_CONFIDENCE' | 'DUPLICATE_RECORD' | 'UNSUPPORTED_LAYOUT' | 'CORRUPTED_PDF' | 'BUSINESS_RULE_VIOLATION'
+    rejection_category            STRING,     -- 'MALFORMED_JSON' | 'MISSING_MANDATORY_FIELD' | 'INVALID_FIELD_TYPE' | 'LOW_CONFIDENCE' | 'DUPLICATE_RECORD' | 'UNSUPPORTED_LAYOUT' | 'CORRUPTED_PDF' | 'BUSINESS_RULE_VIOLATION' | 'AI_CALL_FAILED' (Phase B: the AI provider call itself failed -- transport/HTTP/auth error -- distinct from 'MALFORMED_JSON', where the call succeeded but the response didn't match the expected schema; this is a comment-only convention, not a DB constraint, so no DDL change accompanies it)
     rejection_details             STRING,     -- human-readable specifics
     extraction_confidence         DECIMAL(5,4), -- nullable
     confidence_threshold_applied  DECIMAL(5,4), -- what threshold was configured at the time -- thresholds can change
